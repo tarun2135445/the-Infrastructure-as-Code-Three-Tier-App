@@ -161,7 +161,7 @@ That runs `terraform fmt -check` over everything, then `terraform init -backend=
 
 Roughly **$95-105/month idle** in `us-east-1` with defaults. Free tier covers a chunk of EC2 and RDS. Full breakdown and tips for keeping it near zero in [`docs/COSTS.md`](docs/COSTS.md).
 
-## Common questions an interviewer asks
+## Common questions 
 
 > "Walk me through what happens when a request hits the ALB."
 
