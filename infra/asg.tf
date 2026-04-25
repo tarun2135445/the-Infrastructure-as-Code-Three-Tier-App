@@ -26,8 +26,11 @@ resource "aws_launch_template" "app" {
   vpc_security_group_ids = [aws_security_group.app.id]
 
   metadata_options {
-    http_tokens                 = "required"
-    http_put_response_hop_limit = 2
+    http_tokens = "required"
+    # 1 = "the OS itself can reach IMDS, but a Docker container in bridge
+    # mode cannot." We're not running containers, so 1 is the safer choice.
+    # Bump to 2 if you ever switch to Docker.
+    http_put_response_hop_limit = 1
     http_endpoint               = "enabled"
   }
 
@@ -117,9 +120,22 @@ resource "aws_autoscaling_group" "app" {
     propagate_at_launch = true
   }
 
-  # If the LT is replaced, ASG can re-bind to the new one.
+  # On a fresh apply we'd otherwise race:
+  #   - secret_version writes the password into Secrets Manager
+  #   - role_policy attaches GetSecretValue to the instance role
+  #   - ASG launches instances that try to read the secret
+  # The launch template's user_data references the secret ARN but not the
+  # secret VALUE or the policy, so neither dependency is implicit.
+  depends_on = [
+    aws_secretsmanager_secret_version.db,
+    aws_iam_role_policy.secret_read,
+  ]
+
   lifecycle {
     create_before_destroy = true
+    # Target-tracking autoscaling owns desired_capacity at runtime. Without
+    # this, every plan after a scaling event shows drift forever.
+    ignore_changes = [desired_capacity]
   }
 }
 

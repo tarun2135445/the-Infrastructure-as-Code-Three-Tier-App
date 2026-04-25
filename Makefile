@@ -61,4 +61,4 @@ hit: ## curl the ALB and pretty-print the response.
 ssm: ## Open an SSM session to one of the running app instances.
 	@CMD=$$(cd $(INFRA) && terraform output -raw ssm_session_command); \
 	echo "$$CMD"; \
-	eval $$CMD
+	eval "$$CMD"

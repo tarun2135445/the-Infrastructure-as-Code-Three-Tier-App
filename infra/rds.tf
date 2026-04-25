@@ -64,6 +64,11 @@ resource "aws_db_instance" "app" {
   performance_insights_enabled    = true
   enabled_cloudwatch_logs_exports = ["postgresql", "upgrade"]
 
+  # If left on, AWS quietly upgrades 16.3 -> 16.4 in the maintenance window
+  # and the next plan shows drift on engine_version. Pin or auto — pinning
+  # here so the version in code is authoritative.
+  auto_minor_version_upgrade = false
+
   deletion_protection       = var.db_deletion_protection
   skip_final_snapshot       = !var.db_deletion_protection
   final_snapshot_identifier = var.db_deletion_protection ? "${local.name_prefix}-db-final-${formatdate("YYYYMMDDhhmmss", timestamp())}" : null

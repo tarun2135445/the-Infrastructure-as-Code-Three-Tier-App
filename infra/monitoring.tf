@@ -24,7 +24,9 @@ resource "aws_sns_topic_subscription" "alarms_email" {
 }
 
 locals {
-  alarm_actions = var.alarm_email != "" ? [aws_sns_topic.alarms[0].arn] : []
+  # Splat handles count = 0 gracefully (returns []) without indexing into
+  # a possibly-empty list.
+  alarm_actions = aws_sns_topic.alarms[*].arn
 }
 
 resource "aws_cloudwatch_metric_alarm" "asg_high_cpu" {

@@ -2,13 +2,14 @@
 ###############################################################################
 # Cloud-init script for the app tier.
 #
-# 1. Update OS packages.
-# 2. Install Python + the AWS CLI (Amazon Linux 2023 ships an older one).
-# 3. Pull the DB credentials JSON out of Secrets Manager using the
-#    instance role — never bake them into the AMI or user-data.
-# 4. Drop a tiny Flask app to /opt/app and run it under gunicorn via
-#    systemd so it restarts on crash and on reboot.
-# 5. Tell systemd to start the app.
+# 1. Patch the OS.
+# 2. Install Python + a venv. We deliberately don't `pip install` into the
+#    system Python — recent distros enforce PEP 668, and even where they
+#    don't yet, system-Python pollution is a fragility we don't need.
+# 3. Drop a tiny Flask app to /opt/app and run it under gunicorn via
+#    systemd, as a dedicated unprivileged user.
+# 4. Pull DB credentials from Secrets Manager at runtime via the instance
+#    role — they're never baked into the AMI or this user-data.
 #
 # Anything echoed here lands in /var/log/cloud-init-output.log on the
 # instance. Tail it via SSM if the target group never goes healthy:
@@ -25,12 +26,21 @@ SECRET_ARN="${secret_arn}"
 REGION="${region}"
 
 dnf -y update
-dnf -y install python3-pip python3-devel gcc postgresql15 jq
+dnf -y install python3 python3-pip postgresql15 jq
 
-python3 -m pip install --quiet --upgrade pip
-python3 -m pip install --quiet flask gunicorn psycopg2-binary boto3
+# Dedicated unprivileged user for the app. Binds 8080 (>1024) so no
+# capabilities needed.
+id appuser >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin appuser
 
-install -d -m 0755 /opt/app
+install -d -o appuser -g appuser -m 0755 /opt/app
+
+# venv keeps app deps off the system Python. Built as root, then chowned
+# so appuser can read it.
+python3 -m venv /opt/app/venv
+/opt/app/venv/bin/pip install --quiet --upgrade pip
+/opt/app/venv/bin/pip install --quiet flask gunicorn psycopg2-binary boto3
+chown -R appuser:appuser /opt/app
+
 cat >/opt/app/app.py <<'PYEOF'
 import json
 import os
@@ -40,7 +50,7 @@ from datetime import datetime, timezone
 import boto3
 import psycopg2
 from flask import Flask, jsonify
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 app = Flask(__name__)
 
@@ -59,27 +69,21 @@ def db_credentials():
     return _creds
 
 def imds(path, timeout=1):
-    # IMDSv2: get a token, then read the metadata path.
+    # IMDSv2: PUT a token, then GET the metadata path.
     try:
-        token = urlopen(
-            _req("PUT", "http://169.254.169.254/latest/api/token",
-                 {"X-aws-ec2-metadata-token-ttl-seconds": "60"}),
-            timeout=timeout,
-        ).read().decode()
-        return urlopen(
-            _req("GET", f"http://169.254.169.254/latest/meta-data/{path}",
-                 {"X-aws-ec2-metadata-token": token}),
-            timeout=timeout,
-        ).read().decode()
+        token_req = Request(
+            "http://169.254.169.254/latest/api/token",
+            method="PUT",
+            headers={"X-aws-ec2-metadata-token-ttl-seconds": "60"},
+        )
+        token = urlopen(token_req, timeout=timeout).read().decode()
+        meta_req = Request(
+            f"http://169.254.169.254/latest/meta-data/{path}",
+            headers={"X-aws-ec2-metadata-token": token},
+        )
+        return urlopen(meta_req, timeout=timeout).read().decode()
     except Exception:
         return "unknown"
-
-def _req(method, url, headers):
-    from urllib.request import Request
-    r = Request(url, method=method)
-    for k, v in headers.items():
-        r.add_header(k, v)
-    return r
 
 @app.get("/health")
 def health():
@@ -113,6 +117,7 @@ def index():
         info["db"]["error"]  = str(e)
     return jsonify(info)
 PYEOF
+chown appuser:appuser /opt/app/app.py
 
 cat >/etc/systemd/system/app.service <<EOF
 [Unit]
@@ -121,16 +126,17 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+User=appuser
+Group=appuser
 Environment=AWS_REGION=$REGION
 Environment=DB_SECRET_ARN=$SECRET_ARN
 Environment=DB_HOST=$DB_HOST
 Environment=DB_PORT=$DB_PORT
 Environment=DB_NAME=$DB_NAME
 WorkingDirectory=/opt/app
-ExecStart=/usr/local/bin/gunicorn --bind 0.0.0.0:$APP_PORT --workers 2 --timeout 30 app:app
+ExecStart=/opt/app/venv/bin/gunicorn --bind 0.0.0.0:$APP_PORT --workers 2 --timeout 30 app:app
 Restart=always
 RestartSec=3
-User=root
 
 [Install]
 WantedBy=multi-user.target
